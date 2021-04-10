@@ -29,17 +29,12 @@ object SbtBreezeCodegenPlugin extends AutoPlugin {
   val BreezeCodegen = config("expand")
   val generate = TaskKey[Seq[File]]("generate")
 
-  /**
-    * use this if you don't want jflex to run automatically (because, e.g., you're checking it in)
-    * you'll want to set [[target]] in [[jflex]] using [[unmanagedJflexSettings]] or your own variant
-    */
-  lazy val commonJflexSettings: Seq[Def.Setting[_]] = inConfig(BreezeCodegen)(Seq(
+  lazy val breezeCodegenSettings: Seq[Def.Setting[_]] = inConfig(BreezeCodegen)(Seq(
     sourceDirectory := (sourceDirectory in Compile).value / "codegen",
     generate := {
       val inDir = sourceDirectory.in(Compile).value / "codegen"
       val outDir = target.value
       val out = streams.value
-      // TODO: make this a real plugin or something
       val cachedCompile = FileFunction.cached(out.cacheDirectory / "codegen") { (inFiles: Set[File]) =>
         val outputFiles = for (inFile <- inFiles) yield {
           val outFile = CodegenExpand.outputFilePathFor(inDir.toPath, outDir.toPath, inFile.toPath)
