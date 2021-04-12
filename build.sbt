@@ -1,6 +1,6 @@
 name := "sbt-breeze-expand-codegen"
 organization := "org.scalanlp"
-version := "0.1.6-SNAPSHOT"
+version := "0.2"
 sbtPlugin := true
 description := "code generation for Breeze"
 
