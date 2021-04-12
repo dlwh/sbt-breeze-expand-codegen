@@ -36,14 +36,19 @@ object SbtBreezeCodegenPlugin extends AutoPlugin {
       val outDir = target.value
       val out = streams.value
       val cachedCompile = FileFunction.cached(out.cacheDirectory / "codegen") { (inFiles: Set[File]) =>
+        out.log.info(s"Loading ${inFiles}")
         val outputFiles = for (inFile <- inFiles) yield {
           val outFile = CodegenExpand.outputFilePathFor(inDir.toPath, outDir.toPath, inFile.toPath)
+          out.log.info(s"Writing ${inFile} to ${outFile}")
           CodegenExpand.codegenFile(inFile.toPath, outFile)
           outFile.toFile
         }
         outputFiles
       }
-      cachedCompile((inDir ** "*.scala").get.toSet).toSeq
+      for (f <- (inDir ** "*.scala").get.distinct;
+           out <- cachedCompile(Set(f)).toSeq) yield {
+        out
+      }
     },
     target := (sourceManaged in Compile).value
   )) ++ Seq(

@@ -2,6 +2,7 @@ package breeze.codegen
 
 import java.nio.file.{Files, Path, Paths}
 import scala.collection.immutable.ListMap
+import scala.meta.Term.Block
 import scala.meta._
 
 object CodegenExpand {
@@ -23,22 +24,23 @@ object CodegenExpand {
       case Defn.Def(mods, name, targs, vargs, rtype, rhs) if hasExpand(mods) =>
         val (typesToExpand, typesLeftAbstract) = targs.partition(shouldExpand)
 
-        val exclusions = getExclusions(mods, targs.map(_.name))
+        val exclusions: Seq[Map[String, String]] = getExclusions(mods, targs.map(_.name))
         val shouldValify = checkValify(mods)
 
-        val typesToUnrollAs: ListMap[String, List[Type]] = ListMap.empty ++ typesToExpand.map { td =>
+        val typesToUnrollAs: ListMap[String, List[String]] = ListMap.empty ++ typesToExpand.map { td =>
           td.name.value -> typeMappings(td)
         }
 
         val (valsToExpand, valsToLeave) = vargs.map(_.partition(shouldExpandVarg)).unzip
         val valsToExpand2 = valsToExpand.flatten
 
-        val configurations = transposeListMap(typesToUnrollAs).filterNot(exclusions.toSet)
+        val configurations: Seq[Map[String, String]] = transposeListMap(typesToUnrollAs).filterNot(exclusions.toSet)
         val valExpansions = valsToExpand2.map { v =>
           v.name.value -> solveSequence(v, typesToUnrollAs)
         }.toMap
 
-        val newDefs = configurations.map { typeMap =>
+        val newDefs = configurations.map { stringlyTypedMap =>
+          val typeMap = for ((k, v) <- stringlyTypedMap) yield (k, v.parse[Type].get)
           val grounded = substitute(typeMap, valExpansions, rhs).asInstanceOf[Term]
           val newvargs =
             valsToLeave.filterNot(_.isEmpty).map(_.map(substitute(typeMap, valExpansions, _).asInstanceOf[Term.Param]))
@@ -118,14 +120,14 @@ object CodegenExpand {
 
   /** for a valdef with a [[breeze.macros.expand.sequence]] annotation, converts the sequence of associations to a Map.
     * The return value is the name of the associated abstract type and the sequence of concrete values to sub in*/
-  private def solveSequence(v: Term.Param, typeMappings: Map[String, List[Type]]): (String, Map[String, Term]) = {
+  private def solveSequence(v: Term.Param, typeMappings: Map[String, List[String]]): (String, Map[String, Term]) = {
     v.mods.collectFirst {
       case m@Mod.Annot(i@Init(Type.Apply(ExType("expand.sequence"), Seq(correspondingType)), _, args)) =>
         val name = coerceNameFromType(correspondingType)
         if (args.flatten.length != typeMappings(name).length) {
           error(m.pos, s"@sequence arguments list does not match the expand.args for name")
         }
-        name -> typeMappings(name).zip(args.flatten).toMap.map { case (k, v) => coerceNameFromType(k) -> v}
+        name -> typeMappings(name).zip(args.flatten).toMap.map { case (k, v) => k -> v}
     }.get
   }
 
@@ -136,10 +138,10 @@ object CodegenExpand {
     * @param td
     * @return
     */
-  private def typeMappings(td: Type.Param): List[Type] = {
+  private def typeMappings(td: Type.Param): List[String] = {
     val mods = td.mods.collect {
       case Mod.Annot(Init(ExType("expand.args"), _, args)) =>
-        args.flatten.map { tree => termNameToType(tree) }
+        args.flatten.map { tree => tree.syntax}
     }.flatten
     mods
   }
@@ -151,12 +153,12 @@ object CodegenExpand {
     }
   }
 
-  private def getExclusions(mods: List[Mod], targs: Seq[Name]): Seq[Map[Name, Type]] = {
+  private def getExclusions(mods: List[Mod], targs: Seq[Name]): Seq[Map[String, String]] = {
     mods.collect {
       case  t@Mod.Annot(i@Init(ExType("expand.exclude"), _, List(args))) =>
         if (args.length != targs.length)
           error(t.pos, "arguments to @exclude does not have the same arity as the type symbols!")
-        targs.zip(args.map(aa => termNameToType(aa))).toMap
+        targs.map(_.syntax).zip(args.map(_.syntax)).toMap
     }
   }
 
@@ -191,22 +193,31 @@ object CodegenExpand {
 
   private def substitute(typeMap: Map[String, Type], valExpansions: Map[String, (String, Map[String, Term])], body: Tree): Tree = {
     body.transform {
+      // substitute identifiers for identifiers
       case Type.Name(x) if typeMap.contains(x) =>
         typeMap(x)
       case Term.Name(x) if typeMap.contains(x) =>
         val nme = coerceNameFromType(typeMap(x))
         Term.Name(nme)
-      case Term.Apply(Term.Name(x), args) if valExpansions.contains(x) =>
+      case Term.Name(x) if valExpansions.contains(x) =>
+        val (tname, tmap) = valExpansions(x)
+        tmap(coerceNameFromType(typeMap(tname)))
+      // inline f(args...) if f is supposed to be expanded.
+      case ap@Term.Apply(Term.Name(x), args) if valExpansions.contains(x) =>
         val (tname, tmap) = valExpansions(x)
         val mappedTree = tmap(coerceNameFromType(typeMap(tname)))
         // TODO: this is super fragile. macro annotations handled this fairly well since scala had already
         // done the _ + _ --> (a$1, b$2) => a$1 + b$2 transform
-        var i = 0
-        mappedTree.transform {
-          case x: Term.Placeholder =>
-            i += 1
-            args(i - 1)
-          case fn@Term.Function(fargs, body) =>
+        val withoutBlock = mappedTree match {
+          case Block(List(stat)) => stat
+          case Block(_) => error(mappedTree.pos, "Can't substitute in this expression")
+          case x => x
+        }
+        withoutBlock match {
+          case Term.Function(fargs, body) =>
+            // TODO: this produces a StackOverflowError if the identifier being replaced also occurs in the
+            // replaced body. E.g. Complex.zero and zero
+            // super annoying
             body.transform {
               case n@Term.Name(name) =>
                 val pos = fargs.indexWhere(_.name.value == name)
@@ -216,10 +227,19 @@ object CodegenExpand {
                   n
                 }
             }
+          case _ =>
+            var i = 0
+            val res = withoutBlock.transform {
+              case x: Term.Placeholder =>
+                i += 1
+                args(i - 1)
+            }
+            if (i != args.length) {
+              error(ap.pos, "Mismatch in number of arguments")
+            }
+
+            res
         }
-      case Term.Name(x) if valExpansions.contains(x) =>
-        val (tname, tmap) = valExpansions(x)
-        tmap(coerceNameFromType(typeMap(tname)))
     }
   }
 
@@ -250,7 +270,7 @@ object CodegenExpand {
   }
 
   def outputFilePathFor(inputBaseDir: Path, outDir: Path, inFile: Path): Path = {
-    val relPath = inFile.relativize(inputBaseDir)
+    val relPath = inputBaseDir.relativize(inFile)
     val outFileName = relPath.toString.replaceAll("\\.scala$", ".expanded.scala")
     val outFile = outDir.resolve(outFileName)
     outFile
