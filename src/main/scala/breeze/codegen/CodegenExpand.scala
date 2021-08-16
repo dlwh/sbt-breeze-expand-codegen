@@ -7,19 +7,19 @@ import scala.meta._
 
 object CodegenExpand {
 
-  def codegenFile(inputFile: Path, outputFile: Path): Path = {
+  def codegenFile(dialect: Dialect, inputFile: Path, outputFile: Path): Path = {
     val input = Input.File(inputFile)
-    val exampleTree: Source = input.parse[Source].get
-    val outputTree: Tree = processTree(exampleTree)
+    val exampleTree: Source = dialect(input).parse[Source].get
+    val outputTree: Tree = processTree(exampleTree)(dialect)
 
     Files.createDirectories(outputFile.getParent)
     Files.write(
       outputFile,
-      outputTree.syntax.getBytes("UTF-8")
+      dialect(outputTree).syntax.getBytes("UTF-8")
     )
   }
 
-  def processTree(tree: Tree): Tree = {
+  def processTree(tree: Tree)(implicit dialect: Dialect): Tree = {
     flatTransformDefns(tree) {
       case Defn.Def(mods, name, targs, vargs, rtype, rhs) if hasExpand(mods) =>
         val (typesToExpand, typesLeftAbstract) = targs.partition(shouldExpand)
@@ -264,7 +264,7 @@ object CodegenExpand {
     }
 
     for ( (in, out) <- filePairs) {
-      codegenFile(in, out)
+      codegenFile(Dialect.current, in, out)
     }
 
   }
